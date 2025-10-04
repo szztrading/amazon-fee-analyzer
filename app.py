@@ -5,7 +5,9 @@
 # How to deploy on Streamlit Cloud / GitHub
 # 1) Create a repo with two files:
 #    - app.py  (this file)
-#    - requirements.txt  with:  streamlit\npandas\nopenpyxl
+#    - requirements.txt  with:  streamlit
+pandas
+openpyxl
 # 2) Push to GitHub, then "New app" on streamlit.io and point to app.py.
 #
 # Local run:
@@ -133,7 +135,7 @@ def _detect_header_row_and_sep(text: str) -> Tuple[int, str]:
     """
     lines = text.splitlines()
     # Common separators to try
-    seps = [",", ";", "\t", "|"]
+    seps = [",", ";", "	", "|"]
     target_tokens = ["order", "sku"]
     best = (0, ",")
     for i in range(min(50, len(lines))):
@@ -270,11 +272,16 @@ def build_summary(
     )
 
     # --- Merge Costs for Profit/Margin ---
+    # Pre-create optional columns so downstream selection doesn't fail even without a cost file
     out["unit_cost_total"] = math.nan
     out["gross_profit_ex"] = math.nan
     out["margin_ex"] = math.nan
     out["suggest_price_margin_ex"] = math.nan
     out["suggest_price_margin_incl"] = math.nan
+    # Also create commission_rate / fixed_fees_ex defaults
+    out["commission_rate"] = math.nan
+    # Default fixed fees (ex‑VAT proxy) as FBA + Other; will be recomputed if cost file present
+    out["fixed_fees_ex"] = out["avg_fba"] + out["avg_other"]
 
     if cost_df is not None and not cost_df.empty:
         cdf = _lower_cols(cost_df)
