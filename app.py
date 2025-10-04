@@ -1,21 +1,10 @@
-# Streamlit Amazon Fee Analyzer（中文表头版：SKU 汇总 + ASIN + 成本/毛利 + 建议售价）
+# Streamlit Amazon Fee Analyzer（中文表头 + ASIN + 成本/毛利 + 正确费用占比）
 # ---------------------------------------------------------------------------
-# 部署说明（GitHub + Streamlit Cloud）
-# 1) 仓库内放两个文件：
-#    - app.py  （本文件）
-#    - requirements.txt  内容：
-#        streamlit
-#        pandas
-#        openpyxl
-# 2) 在 streamlit.io 选择该仓库并指定 app.py 部署。
-# 
-# 本应用支持：
-# • 上传 Amazon Date Range/Settlement 报表（CSV/XLSX），自动识别表头、分隔符、编码，跳过前言行；
-# • 可选上传 成本配置表（支持 sku、unit_cost、inbound、packaging、extra、vat_rate、可选 asin）；
-# • 可选上传 目录/Listing 映射表（sku, asin），当交易报表没有 ASIN 时补齐；
-# • 侧边栏设置：是否用含税价显示费率、涨价阈值、目标费用占比、目标毛利率、是否中文表头；
-# • 输出：每 SKU（或 SKU+ASIN）平均售价、费用结构、费用占比、是否建议涨价、建议售价（达成目标费用占比）、
-#         毛利/毛利率（不含税口径）及为达成目标毛利率的建议售价（不含税/含税）。
+# 部署：
+#   requirements.txt 内容：
+#       streamlit
+#       pandas
+#       openpyxl
 
 import io
 import math
@@ -25,12 +14,11 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(page_title="Amazon 费用与利润分析", layout="wide")
-
-st.title("📊 Amazon 费用与利润分析 — SKU/ASIN 定价建议（中文表头版）")
-st.caption("上传 Amazon 报表（CSV/XLSX）+ 可选成本/目录表，自动计算费用占比、毛利与建议售价。")
+st.title("📊 Amazon 费用与利润分析 — SKU/ASIN 定价建议（中文表头）")
+st.caption("上传 Amazon 报表 + 可选成本/目录表，自动计算费用占比、毛利与建议售价。")
 
 # ==========================
-# 工具方法
+# 工具方法 & 列名映射
 # ==========================
 
 def _lower_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -38,32 +26,23 @@ def _lower_cols(df: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip().lower() for c in df.columns]
     return df
 
-# 报表列名别名映射
 COL_ALIASES: Dict[str, List[str]] = {
     "date": ["date/time", "date", "posted date", "posteddate", "transaction posted date"],
+    "type": ["type"],
     "order_id": ["order id", "amazon order id", "amazonorderid"],
     "sku": ["sku", "merchant_sku", "seller-sku", "seller sku", "seller sku id", "sku number"],
     # 收入
     "principal": ["product sales", "principal", "item-price", "item price"],
     "tax": ["product sales tax", "tax", "item-tax", "item tax"],
-    # 费用
+    # 费用（报表里通常为负数，我们会取反转为正的成本）
     "selling_fees": ["selling fees", "commission", "referral fee", "selling fee"],
-    "fba_fees": [
-        "fba fees",
-        "fbaperunitfulfillmentfee",
-        "fulfillment fee",
-        "fulfilment fee",
-        "fulfillment-fee",
-    ],
+    "fba_fees": ["fba fees", "fbaperunitfulfillmentfee", "fulfillment fee", "fulfilment fee", "fulfillment-fee"],
     "other_txn_fees": ["other transaction fees", "shipping chargeback", "shippingchargeback"],
     "other": ["other"],
     "qty": ["quantity", "qty"],
-    "type": ["type"],
-    "marketplace": ["marketplace"],
-    "asin": ["asin", "asin/isbn", "asin / isbn", "asin (child)", "asin (parent)"]
+    "asin": ["asin", "asin/isbn", "asin / isbn", "asin (child)", "asin (parent)"],
 }
 
-# 成本表别名
 COST_ALIASES: Dict[str, List[str]] = {
     "sku": ["sku", "seller-sku", "merchant_sku"],
     "unit_cost": ["unit_cost", "cogs", "cost", "unit cost"],
@@ -71,47 +50,31 @@ COST_ALIASES: Dict[str, List[str]] = {
     "packaging": ["packaging", "packaging_per_unit", "pack", "pack cost"],
     "extra": ["extra", "extra_per_unit", "overhead", "other_cost"],
     "vat_rate": ["vat_rate", "vat", "vat %", "vat percent", "vatpercentage"],
-    "asin": ["asin", "asin/isbn", "asin (child)", "asin (parent)"]
+    "asin": ["asin", "asin/isbn", "asin (child)", "asin (parent)"],
 }
 
-# 目录表（sku, asin）别名
 CATALOG_ALIASES: Dict[str, List[str]] = {
     "sku": ["sku", "seller-sku", "merchant_sku"],
-    "asin": ["asin", "asin/isbn", "asin (child)", "asin (parent)"]
+    "asin": ["asin", "asin/isbn", "asin (child)", "asin (parent)"],
 }
-
 
 def pick_col(df: pd.DataFrame, keys: List[str]) -> Optional[str]:
     cols = set(df.columns)
     for k in keys:
-        if k in cols:
-            return k
+        if k in cols: return k
     return None
-
 
 def auto_map_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     dfl = _lower_cols(df)
-    mapping: Dict[str, Optional[str]] = {}
-    for std_name, aliases in COL_ALIASES.items():
-        mapping[std_name] = pick_col(dfl, [a.lower() for a in aliases])
-    return mapping
-
+    return {k: pick_col(dfl, [a.lower() for a in v]) for k, v in COL_ALIASES.items()}
 
 def auto_map_cost_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     dfl = _lower_cols(df)
-    mapping: Dict[str, Optional[str]] = {}
-    for std_name, aliases in COST_ALIASES.items():
-        mapping[std_name] = pick_col(dfl, [a.lower() for a in aliases])
-    return mapping
-
+    return {k: pick_col(dfl, [a.lower() for a in v]) for k, v in COST_ALIASES.items()}
 
 def auto_map_catalog_columns(df: pd.DataFrame) -> Dict[str, Optional[str]]:
     dfl = _lower_cols(df)
-    mapping: Dict[str, Optional[str]] = {}
-    for std_name, aliases in CATALOG_ALIASES.items():
-        mapping[std_name] = pick_col(dfl, [a.lower() for a in aliases])
-    return mapping
-
+    return {k: pick_col(dfl, [a.lower() for a in v]) for k, v in CATALOG_ALIASES.items()}
 
 def coerce_number(s):
     """金额字符串转浮点，支持( )负号、货币符号、千分位。"""
@@ -122,7 +85,7 @@ def coerce_number(s):
     t = str(s).strip()
     if t == "" or t.lower() in {"nan", "none"}:
         return 0.0
-    t = t.replace(",", "").replace("£", "").replace("¥", "").replace("$", "")
+    t = t.replace(",", "").replace("£", "").replace("$", "").replace("¥", "")
     neg = False
     if t.startswith("(") and t.endswith(")"):
         neg = True
@@ -140,7 +103,7 @@ def coerce_number(s):
 def _detect_header_row_and_sep(text: str) -> Tuple[int, str]:
     """自动定位数据表头行与分隔符（逗号/分号/Tab/竖线）。"""
     lines = text.splitlines()
-    seps = [",", ";", "	", "|"]
+    seps = [",", ";", "\t", "|"]
     target_tokens = ["order", "sku"]
     for i in range(min(50, len(lines))):
         raw = lines[i].lower()
@@ -157,7 +120,6 @@ def _detect_header_row_and_sep(text: str) -> Tuple[int, str]:
                 max_cols, best_sep, best_i = cols, sep, i
     return best_i, best_sep
 
-
 def read_amazon_report(uploaded_file) -> pd.DataFrame:
     name = uploaded_file.name.lower()
     data = uploaded_file.read()
@@ -171,7 +133,6 @@ def read_amazon_report(uploaded_file) -> pd.DataFrame:
         except Exception:
             continue
     return pd.read_csv(io.BytesIO(data), sep=None, engine="python", on_bad_lines="skip")
-
 
 def read_any_csv_like(uploaded_file) -> pd.DataFrame:
     name = uploaded_file.name.lower()
@@ -188,7 +149,7 @@ def read_any_csv_like(uploaded_file) -> pd.DataFrame:
     return pd.read_csv(io.BytesIO(data), sep=None, engine="python", on_bad_lines="skip")
 
 # ==========================
-# 核心汇总
+# 核心汇总（更正后的费用口径）
 # ==========================
 
 def build_summary(
@@ -209,6 +170,7 @@ def build_summary(
     if missing:
         raise ValueError(f"缺少关键列: {missing}. 现有列举例: {list(df.columns)[:20]} ...")
 
+    type_col = cols.get("type")
     sku_col = cols["sku"]
     principal_col = cols["principal"]
     tax_col = cols.get("tax")
@@ -224,16 +186,16 @@ def build_summary(
         if c and c in df.columns:
             df[c] = df[c].map(coerce_number)
 
+    # 含税/不含税价格
     df["price_incl_tax"] = df[principal_col] + (df[tax_col] if include_tax and tax_col else 0.0)
     df["price_ex_vat"] = df[principal_col]
 
-    df["commission_fee"] = df[selling_col].fillna(0)
-    df["fba_fee"] = df[fba_col].fillna(0)
+    # 费用统一转为“正的成本”（报表里通常为负数）
+    df["commission_fee"] = -df[selling_col].fillna(0)
+    df["fba_fee"] = -df[fba_col].fillna(0)
     df["other_fees"] = 0.0
-    if other_txn_col:
-        df["other_fees"] += df[other_txn_col].fillna(0)
-    if other_col:
-        df["other_fees"] += df[other_col].fillna(0)
+    if other_txn_col: df["other_fees"] += -df[other_txn_col].fillna(0)
+    if other_col:     df["other_fees"]  += -df[other_col].fillna(0)
 
     df["fees_total"] = df["commission_fee"] + df["fba_fee"] + df["other_fees"]
 
@@ -243,7 +205,11 @@ def build_summary(
         df[qty_col or "quantity"] = 1
         qty_col = qty_col or "quantity"
 
-    work = df.loc[df["price_incl_tax"].notna()]
+    # 仅统计订单行（避免调整/汇款影响占比）
+    if type_col and type_col in df.columns:
+        work = df[df[type_col].astype(str).str.lower().eq("order")].copy()
+    else:
+        work = df.loc[df["price_incl_tax"].notna()].copy()
 
     group_cols = [sku_col] + ([asin_col] if asin_col else [])
     grp = work.groupby(group_cols, dropna=False)
@@ -251,28 +217,35 @@ def build_summary(
         grp.agg(
             orders=(sku_col, "count"),
             units=(qty_col, "sum"),
+            # 平均值（参考）
             avg_price_incl=("price_incl_tax", "mean"),
             avg_price_ex=("price_ex_vat", "mean"),
             avg_commission=("commission_fee", "mean"),
             avg_fba=("fba_fee", "mean"),
             avg_other=("other_fees", "mean"),
+            # 总额（主口径）
+            sum_price_incl=("price_incl_tax", "sum"),
+            sum_price_ex=("price_ex_vat", "sum"),
+            sum_fees=("fees_total", "sum"),
         )
         .reset_index()
         .rename(columns={**({sku_col: "SKU"}), **({asin_col: "ASIN"} if asin_col else {})})
     )
 
-    out["avg_fees"] = out["avg_commission"] + out["avg_fba"] + out["avg_other"]
-    base_price = out["avg_price_incl"] if include_tax else out["avg_price_ex"]
-    out["fee_ratio"] = out["avg_fees"] / base_price.replace({0: math.nan})
+    # 费用占比 —— 用“总费用/总售价”
+    base_sum = out["sum_price_incl"] if include_tax else out["sum_price_ex"]
+    out["fee_ratio"] = out["sum_fees"] / base_sum.replace({0: math.nan})
 
-    out["raise_price"] = (out["avg_fees"] > raise_fee_abs_threshold) & (out["fee_ratio"] > raise_fee_ratio_threshold)
+    # 是否建议涨价（阈值可调）
+    out["raise_price"] = (out["avg_fees"] if "avg_fees" in out.columns else out["sum_fees"]/out["orders"]) > raise_fee_abs_threshold
+    out["raise_price"] &= out["fee_ratio"] > raise_fee_ratio_threshold
 
-    out["suggest_price_fee_target_incl"] = out.apply(
-        lambda r: (r["avg_fees"] / target_fee_ratio) if include_tax else math.nan, axis=1
-    )
-    out["suggest_price_fee_target_ex"] = out.apply(
-        lambda r: (r["avg_fees"] / target_fee_ratio) if not include_tax else math.nan, axis=1
-    )
+    # 建议售价（按费用占比目标；将当前“平均费用”视作近似固定）
+    # 用均值更稳：避免极端值干扰
+    if "avg_fees" not in out.columns:
+        out["avg_fees"] = out["sum_fees"] / out["orders"].replace({0: math.nan})
+    out["suggest_price_fee_target_incl"] = out["avg_fees"] / target_fee_ratio if include_tax else math.nan
+    out["suggest_price_fee_target_ex"] = out["avg_fees"] / target_fee_ratio if not include_tax else math.nan
 
     # 预创建利润相关列（即使无成本表也不报错）
     out["unit_cost_total"], out["gross_profit_ex"], out["margin_ex"] = math.nan, math.nan, math.nan
@@ -280,7 +253,7 @@ def build_summary(
     out["commission_rate"] = math.nan
     out["fixed_fees_ex"] = out["avg_fba"] + out["avg_other"]
 
-    # ==== 从成本表/目录表补齐 ASIN（当报表无 ASIN） ====
+    # === 若报表无 ASIN，从成本表/目录表补齐 ===
     def _pick(df, names):
         cols = [c for c in df.columns if c.lower().strip() in [n.lower() for n in names]]
         return cols[0] if cols else None
@@ -288,10 +261,11 @@ def build_summary(
     if ("ASIN" not in out.columns) and (cost_df is not None) and (not cost_df.empty):
         c = _lower_cols(cost_df)
         sku_c = _pick(c, COST_ALIASES["sku"])
-        asin_c = _pick(c, COST_ALIASES["asin"]) if "asin" in COST_ALIASES else None
+        asin_c = _pick(c, COST_ALIASES["asin"])
         if sku_c and asin_c and asin_c in c.columns:
             out = (
-                out.merge(c[[sku_c, asin_c]].drop_duplicates(), left_on="SKU", right_on=sku_c, how="left")
+                out.merge(c[[sku_c, asin_c]].drop_duplicates(),
+                          left_on="SKU", right_on=sku_c, how="left")
                    .rename(columns={asin_c: "ASIN"})
                    .drop(columns=[sku_c])
             )
@@ -302,12 +276,13 @@ def build_summary(
         asin_t = _pick(t, CATALOG_ALIASES["asin"])
         if sku_t and asin_t:
             out = (
-                out.merge(t[[sku_t, asin_t]].drop_duplicates(), left_on="SKU", right_on=sku_t, how="left")
+                out.merge(t[[sku_t, asin_t]].drop_duplicates(),
+                          left_on="SKU", right_on=sku_t, how="left")
                    .rename(columns={asin_t: "ASIN"})
                    .drop(columns=[sku_t])
             )
 
-    # ==== 利润（需成本表） ====
+    # === 利润（需成本表；不含税口径） ===
     if cost_df is not None and not cost_df.empty:
         cdf = _lower_cols(cost_df)
         cmap = auto_map_cost_columns(cdf)
@@ -335,7 +310,8 @@ def build_summary(
         need_backout = rev_ex.isna() | (rev_ex == 0)
         if need_backout.any():
             out.loc[need_backout & out["vat_rate_norm"].notna(), "avg_price_ex"] = (
-                out.loc[need_backout & out["vat_rate_norm"].notna(), "avg_price_incl"] / (1 + out.loc[need_backout & out["vat_rate_norm"].notna(), "vat_rate_norm"])
+                out.loc[need_backout & out["vat_rate_norm"].notna(), "avg_price_incl"]
+                / (1 + out.loc[need_backout & out["vat_rate_norm"].notna(), "vat_rate_norm"])
             )
         rev_ex = out["avg_price_ex"]
 
@@ -356,21 +332,22 @@ def build_summary(
             out["suggest_price_margin_ex"] * (1 + out["vat_rate_norm"])
         )
 
-    # ==== 输出列顺序（含 ASIN） ====
+    # 输出列顺序（含 ASIN）
     nice = out.copy()
     cols_order = ["SKU"]
-    if "ASIN" in nice.columns:
-        cols_order.append("ASIN")
+    if "ASIN" in nice.columns: cols_order.append("ASIN")
     cols_order += [
         "orders", "units",
         "avg_price_incl", "avg_price_ex",
-        "avg_commission", "avg_fba", "avg_other", "avg_fees", "fee_ratio", "raise_price",
+        "avg_commission", "avg_fba", "avg_other", "avg_fees",  # avg_fees用于建议售价
+        "sum_price_incl", "sum_price_ex", "sum_fees",          # 显示总额口径（可选）
+        "fee_ratio", "raise_price",
         "suggest_price_fee_target_incl", "suggest_price_fee_target_ex",
         "unit_cost_total", "commission_rate", "fixed_fees_ex", "gross_profit_ex", "margin_ex",
         "suggest_price_margin_ex", "suggest_price_margin_incl",
     ]
     cols_order = [c for c in cols_order if c in nice.columns]
-    nice = nice[cols_order].sort_values(["raise_price", "margin_ex", "fee_ratio", "avg_fees"], ascending=[False, True, False, False]).reset_index(drop=True)
+    nice = nice[cols_order].sort_values(["raise_price", "fee_ratio", "sum_fees"], ascending=[False, False, False]).reset_index(drop=True)
     return nice
 
 # ==========================
@@ -448,7 +425,10 @@ CN_MAP = {
     "avg_commission": "平均佣金",
     "avg_fba": "平均FBA费用",
     "avg_other": "其他费用",
-    "avg_fees": "总费用",
+    "avg_fees": "平均总费用",
+    "sum_price_incl": "含税总销售额",
+    "sum_price_ex": "不含税总销售额",
+    "sum_fees": "总费用",
     "fee_ratio": "费用占比",
     "raise_price": "是否建议涨价",
     "suggest_price_fee_target_incl": "目标费用占比建议售价（含税）",
@@ -466,6 +446,7 @@ st.subheader("🔎 SKU/ASIN 汇总（点击列头可排序）")
 fmt = summary.copy()
 for c in [
     "avg_price_incl", "avg_price_ex", "avg_commission", "avg_fba", "avg_other", "avg_fees",
+    "sum_price_incl", "sum_price_ex", "sum_fees",
     "fixed_fees_ex", "gross_profit_ex", "suggest_price_fee_target_incl", "suggest_price_fee_target_ex",
     "suggest_price_margin_ex", "suggest_price_margin_incl", "unit_cost_total",
 ]:
@@ -477,16 +458,20 @@ if "margin_ex" in fmt.columns:
     fmt["margin_ex"] = fmt["margin_ex"].map(lambda x: "" if pd.isna(x) else f"{x*100:.1f}%")
 if "commission_rate" in fmt.columns:
     fmt["commission_rate"] = fmt["commission_rate"].map(lambda x: "" if pd.isna(x) else f"{x*100:.1f}%")
-fmt["raise_price"] = fmt["raise_price"].map(lambda b: "✅ 建议涨价" if b else "👍 可维持")
+if "raise_price" in fmt.columns:
+    fmt["raise_price"] = fmt["raise_price"].map(lambda b: "✅ 建议涨价" if bool(b) else "👍 可维持")
 
-if use_cn_headers:
+if st.sidebar.toggle("页面显示中文表头", value=True, key="cn_show"):
     fmt = fmt.rename(columns={k: v for k, v in CN_MAP.items() if k in fmt.columns})
 
 st.dataframe(fmt, use_container_width=True, hide_index=True)
 
-# 高优先级
+# 高优先级列表
 with st.expander("🔥 高费用占比或低毛利（建议优先处理）"):
-    hot = summary[(summary.get("raise_price", False)) | (summary.get("margin_ex").notna() & (summary.get("margin_ex") < target_margin))].copy()
+    m1 = summary["raise_price"] if "raise_price" in summary.columns else pd.Series([False]*len(summary))
+    m2 = (summary["margin_ex"] < target_margin) if "margin_ex" in summary.columns else pd.Series([False]*len(summary))
+    m2 = m2.fillna(False)
+    hot = summary[m1 | m2].copy()
     if hot.empty:
         st.write("暂无命中阈值的SKU/ASIN。")
     else:
@@ -497,8 +482,7 @@ with st.expander("🔥 高费用占比或低毛利（建议优先处理）"):
         for c in ["fee_ratio", "margin_ex"]:
             if c in hfmt.columns:
                 hfmt[c] = hfmt[c].map(lambda x: f"{x*100:.1f}%" if pd.notna(x) else "")
-        if use_cn_headers:
-            hfmt = hfmt.rename(columns={k: v for k, v in CN_MAP.items() if k in hfmt.columns})
+        hfmt = hfmt.rename(columns={k: v for k, v in CN_MAP.items() if k in hfmt.columns})
         st.dataframe(hfmt, use_container_width=True, hide_index=True)
 
 # ==========================
@@ -507,7 +491,7 @@ with st.expander("🔥 高费用占比或低毛利（建议优先处理）"):
 st.subheader("📥 导出 Excel")
 try:
     export_df = summary.copy()
-    if use_cn_headers:
+    if st.sidebar.toggle("导出中文表头", value=True, key="cn_export"):
         export_df = export_df.rename(columns={k: v for k, v in CN_MAP.items() if k in export_df.columns})
 
     output = io.BytesIO()
@@ -540,4 +524,4 @@ try:
 except Exception as e:
     st.error(f"导出失败: {e}")
 
-st.caption("提示：若交易报表无 ASIN，可上传 成本表（含 asin 列）或 目录表（sku, asin）补齐。利润以不含税口径计算；费用占比可切换含/不含税显示。")
+st.caption("提示：若交易报表无 ASIN，可上传 成本表（含 asin 列）或 目录表（sku, asin）补齐。费用占比用“总费用/总售价”，默认仅统计 Order 行。利润以不含税口径计算；费用占比可切换含/不含税显示。")
