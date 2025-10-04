@@ -6,8 +6,8 @@
 # 1) Create a repo with two files:
 #    - app.py  (this file)
 #    - requirements.txt  with:  streamlit
-# pandas
-# openpyxl
+pandas
+openpyxl
 # 2) Push to GitHub, then "New app" on streamlit.io and point to app.py.
 #
 # Local run:
@@ -66,6 +66,7 @@ COL_ALIASES: Dict[str, List[str]] = {
     "qty": ["quantity", "qty"],
     "type": ["type"],
     "marketplace": ["marketplace"],
+    "asin": ["asin", "asin/ isbn", "asin/isbn", "asin (child)", "asin (parent)"]
 }
 
 # Aliases for Cost Config file
@@ -215,6 +216,7 @@ def build_summary(
     other_txn_col = cols.get("other_txn_fees")
     other_col = cols.get("other")
     qty_col = cols.get("qty")
+    asin_col = cols.get("asin")
 
     # Prepare numeric fields
     for c in [principal_col, tax_col, selling_col, fba_col, other_txn_col, other_col]:
@@ -243,7 +245,8 @@ def build_summary(
 
     work = df.loc[df["price_incl_tax"].notna()]
 
-    grp = work.groupby(sku_col, dropna=False)
+    group_cols = [sku_col] + ([asin_col] if asin_col else [])
+    grp = work.groupby(group_cols, dropna=False)
     out = grp.agg(
         orders=(sku_col, "count"),
         units=(qty_col, "sum"),
@@ -252,7 +255,7 @@ def build_summary(
         avg_commission=("commission_fee", "mean"),
         avg_fba=("fba_fee", "mean"),
         avg_other=("other_fees", "mean"),
-    ).reset_index().rename(columns={sku_col: "SKU"})
+    ) .reset_index() .rename(columns={**({sku_col: "SKU"}), **({asin_col: "ASIN"} if asin_col else {})})
 
     out["avg_fees"] = out["avg_commission"] + out["avg_fba"] + out["avg_other"]
     base_price = out["avg_price_incl"] if include_tax else out["avg_price_ex"]
@@ -342,14 +345,21 @@ def build_summary(
         )
 
     nice = out.copy()
-    nice = nice[[
-        "SKU", "orders", "units",
+    # Build columns dynamically to include ASIN when available
+    cols_order = ["SKU"]
+    if "ASIN" in nice.columns:
+        cols_order.append("ASIN")
+    cols_order += [
+        "orders", "units",
         "avg_price_incl", "avg_price_ex",
         "avg_commission", "avg_fba", "avg_other", "avg_fees", "fee_ratio", "raise_price",
         "suggest_price_fee_target_incl", "suggest_price_fee_target_ex",
         "unit_cost_total", "commission_rate", "fixed_fees_ex", "gross_profit_ex", "margin_ex",
         "suggest_price_margin_ex", "suggest_price_margin_incl"
-    ]]
+    ]
+    # Keep only those that exist (safety)
+    cols_order = [c for c in cols_order if c in nice.columns]
+    nice = nice[cols_order]
 
     nice = nice.sort_values(["raise_price", "margin_ex", "fee_ratio", "avg_fees"], ascending=[False, True, False, False]).reset_index(drop=True)
     return nice
