@@ -7,7 +7,7 @@
 #    - app.py  (this file)
 #    - requirements.txt  with:  streamlit
 # pandas
-openpyxl
+# openpyxl
 # 2) Push to GitHub, then "New app" on streamlit.io and point to app.py.
 #
 # Local run:
